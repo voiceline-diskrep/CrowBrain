@@ -24,6 +24,12 @@ export function McpConnectView({
   const [copiedKey, setCopiedKey] = useState<string | null>(null)
   const [activities, setActivities] = useState<AgentActivityEvent[]>([])
 
+  useEffect(() => {
+    if (targetProjectId !== 'active' && !projects.some((p) => p.id === targetProjectId)) {
+      setTargetProjectId('active')
+    }
+  }, [projects, targetProjectId])
+
   const endpointUrl =
     targetProjectId === 'active'
       ? `http://127.0.0.1:${mcpPort}/sse`

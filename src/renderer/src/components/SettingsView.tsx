@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import type { ReactElement } from 'react'
 import { Cloud, CloudOff, Download, ExternalLink, FolderOpen, GitBranch, RefreshCw } from 'lucide-react'
 import type {
@@ -62,6 +62,32 @@ export function SettingsView({
   const [gitRepoInput, setGitRepoInput] = useState(settings.gitSync.repoUrl || '')
   const [gitBranchInput, setGitBranchInput] = useState(settings.gitSync.branch || 'main')
   const [gitBusy, setGitBusy] = useState(false)
+  const [mcpPortInput, setMcpPortInput] = useState(String(settings.mcpPort || 3345))
+
+  useEffect(() => {
+    setClientIdInput(settings.googleDrive.clientId || '')
+    setClientSecretInput(settings.googleDrive.clientSecret || '')
+  }, [settings.googleDrive.clientId, settings.googleDrive.clientSecret])
+
+  useEffect(() => {
+    setGitRepoInput(settings.gitSync.repoUrl || '')
+    setGitBranchInput(settings.gitSync.branch || 'main')
+  }, [settings.gitSync.repoUrl, settings.gitSync.branch])
+
+  useEffect(() => {
+    setMcpPortInput(String(settings.mcpPort || 3345))
+  }, [settings.mcpPort])
+
+  const handleSaveMcpPort = (): void => {
+    const parsed = Number.parseInt(mcpPortInput, 10)
+    if (Number.isNaN(parsed) || parsed < 1024 || parsed > 65535) {
+      setMcpPortInput(String(settings.mcpPort))
+      return
+    }
+    if (parsed !== settings.mcpPort) {
+      void onUpdateSettings({ mcpPort: parsed })
+    }
+  }
 
   const handleSaveGitConfig = async (): Promise<void> => {
     await onUpdateSettings({
@@ -205,6 +231,49 @@ export function SettingsView({
               <FolderOpen size={14} />
               <span>Choose Folder</span>
             </button>
+          </div>
+
+          <div
+            className="pt-3 flex items-center justify-between gap-3 flex-wrap"
+            style={{ borderTop: '1px solid var(--cb-border)' }}
+          >
+            <div>
+              <div className="text-xs font-medium">MCP Server Port</div>
+              <div className="text-[11px]" style={{ color: 'var(--cb-text-muted)' }}>
+                Local port for SSE connections on 127.0.0.1 (1024-65535).
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <input
+                type="number"
+                min={1024}
+                max={65535}
+                value={mcpPortInput}
+                onChange={(e) => setMcpPortInput(e.target.value)}
+                onBlur={handleSaveMcpPort}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') handleSaveMcpPort()
+                }}
+                className="w-24 px-2.5 py-1.5 rounded text-xs font-mono outline-none"
+                style={{
+                  backgroundColor: 'var(--cb-bg)',
+                  border: '1px solid var(--cb-border)',
+                  color: 'var(--cb-text)'
+                }}
+              />
+              <button
+                type="button"
+                onClick={handleSaveMcpPort}
+                className="px-2.5 py-1.5 rounded text-xs font-medium cb-transition cursor-pointer"
+                style={{
+                  backgroundColor: 'var(--cb-surface-alt)',
+                  border: '1px solid var(--cb-border)',
+                  color: 'var(--cb-text)'
+                }}
+              >
+                Apply
+              </button>
+            </div>
           </div>
         </section>
 

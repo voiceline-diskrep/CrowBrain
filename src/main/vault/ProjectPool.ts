@@ -1,5 +1,5 @@
 import path from 'path'
-import type { ProjectEntry } from '@shared/types'
+import type { ProjectEntry, VaultChangeEvent } from '@shared/types'
 import { VaultManager } from './VaultManager'
 import { BackupsManager } from './BackupsManager'
 import { LogsManager } from './LogsManager'
@@ -14,6 +14,8 @@ export interface ProjectRuntime {
 export class ProjectPool {
   private runtimes = new Map<string, ProjectRuntime>()
   private activeProjectId = 'default'
+
+  constructor(private readonly onVaultChange?: (event: VaultChangeEvent) => void) {}
 
   async syncProjects(projects: ProjectEntry[], activeProjectId: string): Promise<void> {
     this.activeProjectId = activeProjectId
@@ -40,7 +42,10 @@ export class ProjectPool {
         continue
       }
 
-      const vault = new VaultManager(project.vaultPath)
+      const projectId = project.id
+      const vault = new VaultManager(project.vaultPath, (kind) => {
+        this.onVaultChange?.({ projectId, kind })
+      })
       await vault.init()
       const backups = new BackupsManager(project.vaultPath)
       const logs = new LogsManager(project.vaultPath)

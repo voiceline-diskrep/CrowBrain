@@ -4,8 +4,17 @@ import { ChevronDown, ChevronUp, FileCode, Plus, RefreshCw, Search, Tag, X } fro
 import type { MessageBackup } from '@shared/types'
 import { formatTimestamp } from './types'
 
-export function BackupsView(): ReactElement {
+interface BackupsViewProps {
+  refreshSignal?: number
+}
+
+export function BackupsView({ refreshSignal = 0 }: BackupsViewProps): ReactElement {
   const [messages, setMessages] = useState<MessageBackup[]>([])
+  const [knownHarnesses, setKnownHarnesses] = useState<string[]>([
+    'antigravity',
+    'claude-code',
+    'codex'
+  ])
   const [harnessFilter, setHarnessFilter] = useState<string>('')
   const [searchQuery, setSearchQuery] = useState<string>('')
   const [loading, setLoading] = useState<boolean>(true)
@@ -31,6 +40,13 @@ export function BackupsView(): ReactElement {
         limit: 200
       })
       setMessages(data)
+      setKnownHarnesses((prev) => {
+        const next = new Set(prev)
+        for (const msg of data) {
+          if (msg.harness) next.add(msg.harness)
+        }
+        return Array.from(next).sort()
+      })
     } catch (err) {
       console.error('Failed to load backed-up messages:', err)
     } finally {
@@ -40,15 +56,9 @@ export function BackupsView(): ReactElement {
 
   useEffect(() => {
     void loadMessages()
-  }, [loadMessages])
+  }, [loadMessages, refreshSignal])
 
-  const harnesses = useMemo(() => {
-    const set = new Set<string>(['antigravity', 'claude-code', 'codex'])
-    for (const msg of messages) {
-      if (msg.harness) set.add(msg.harness)
-    }
-    return Array.from(set).sort()
-  }, [messages])
+  const harnesses = useMemo(() => knownHarnesses, [knownHarnesses])
 
   const toggleExpand = (id: string): void => {
     setExpandedIds((prev) => ({ ...prev, [id]: !prev[id] }))

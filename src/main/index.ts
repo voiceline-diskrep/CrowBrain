@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync } from 'node:fs'
 import { basename, join } from 'node:path'
-import { app, BrowserWindow, dialog, ipcMain, nativeImage } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, nativeImage, shell } from 'electron'
 import {
   IPC_CHANNELS,
   type AgentActivityEvent,
@@ -8,6 +8,7 @@ import {
   type GitSyncStatus,
   type MessageBackup,
   type SyncStatus,
+  type VaultChangeEvent,
   type WorkLogEntry
 } from '@shared/types'
 import { SettingsManager } from './settings'
@@ -52,6 +53,12 @@ function recordAndBroadcastActivity(event: AgentActivityEvent): void {
   }
 }
 
+function broadcastVaultChange(event: VaultChangeEvent): void {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send(IPC_CHANNELS.VAULT_ON_CHANGE, event)
+  }
+}
+
 async function syncProjectPool(): Promise<void> {
   const settings = settingsManager.getSettings()
   await projectPool.syncProjects(settings.projects, settings.activeProjectId)
@@ -72,6 +79,24 @@ function createWindow(): void {
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       sandbox: false
+    }
+  })
+
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (/^https?:\/\//i.test(url)) {
+      void shell.openExternal(url)
+    }
+    return { action: 'deny' }
+  })
+
+  mainWindow.webContents.once('did-finish-load', () => {
+    const settings = settingsManager.getSettings()
+    if (settings.checkUpdatesOnStartup) {
+      void checkForUpdates(app.getVersion()).then((result) => {
+        if (result.hasUpdate && mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send(IPC_CHANNELS.APP_ON_UPDATE, result)
+        }
+      })
     }
   })
 
@@ -199,12 +224,13 @@ function registerIpcHandlers(): void {
       mkdirSync(targetPath, { recursive: true })
 
       const id = `proj-${Date.now()}`
+      const now = Date.now()
       const updated = settingsManager.updateSettings({
         vaultPath: targetPath,
         activeProjectId: id,
         projects: [
           ...current.projects,
-          { id, name: trimmed, vaultPath: targetPath, createdAt: Date.now() }
+          { id, name: trimmed, slug, vaultPath: targetPath, createdAt: now, updatedAt: now }
         ]
       })
       await syncProjectPool()
@@ -233,7 +259,7 @@ function registerIpcHandlers(): void {
       const current = settingsManager.getSettings()
       if (!trimmed) return current
       const projects = current.projects.map((p) =>
-        p.id === projectId ? { ...p, name: trimmed } : p
+        p.id === projectId ? { ...p, name: trimmed, updatedAt: Date.now() } : p
       )
       const updated = settingsManager.updateSettings({ projects })
       await syncProjectPool()
@@ -256,6 +282,7 @@ function registerIpcHandlers(): void {
         : remaining.find((p) => p.id === current.activeProjectId) ?? remaining[0]
     const updated = settingsManager.updateSettings({
       projects: remaining,
+      deletedProjectIds: [...(current.deletedProjectIds ?? []), projectId],
       activeProjectId: nextActive.id,
       vaultPath: nextActive.vaultPath
     })
@@ -266,7 +293,7 @@ function registerIpcHandlers(): void {
   ipcMain.handle(IPC_CHANNELS.PROJECT_TOGGLE_PIN, async (_event, projectId: string) => {
     const current = settingsManager.getSettings()
     const projects = current.projects.map((p) =>
-      p.id === projectId ? { ...p, pinned: !p.pinned } : p
+      p.id === projectId ? { ...p, pinned: !p.pinned, updatedAt: Date.now() } : p
     )
     const updated = settingsManager.updateSettings({ projects })
     await syncProjectPool()
@@ -418,13 +445,14 @@ async function bootstrap(): Promise<void> {
   settingsManager = new SettingsManager(app.getPath('userData'))
   const settings = settingsManager.getSettings()
 
-  projectPool = new ProjectPool()
+  projectPool = new ProjectPool(broadcastVaultChange)
   await projectPool.syncProjects(settings.projects, settings.activeProjectId)
 
   mcpServer = new CrowBrainMcpServer({
     resolveProject: (projectRef) => projectPool.resolve(projectRef),
     listProjects: () => projectPool.listProjects(),
     onActivity: recordAndBroadcastActivity,
+    onVaultChange: broadcastVaultChange,
     version: app.getVersion()
   })
 

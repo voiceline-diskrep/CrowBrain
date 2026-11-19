@@ -29,6 +29,7 @@ import type {
   RulesData,
   SyncStatus,
   UpdateCheckResult,
+  VaultChangeEvent,
   VaultNote,
   WorkLogEntry
 } from '@shared/types'
@@ -87,6 +88,8 @@ export interface CrowBrainAPI {
   runGitSyncNow(): Promise<GitSyncStatus>
   selectGitSyncRoot(): Promise<string | null>
   onGitSyncStatus(cb: (status: GitSyncStatus) => void): () => void
+  onVaultChange(cb: (event: VaultChangeEvent) => void): () => void
+  onUpdateAvailable(cb: (result: UpdateCheckResult) => void): () => void
 }
 
 declare global {

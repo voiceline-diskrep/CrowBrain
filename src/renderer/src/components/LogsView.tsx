@@ -6,7 +6,11 @@ import { formatTimestamp } from './types'
 
 const CATEGORIES = ['all', 'feature', 'fix', 'refactor', 'release', 'note'] as const
 
-export function LogsView(): ReactElement {
+interface LogsViewProps {
+  refreshSignal?: number
+}
+
+export function LogsView({ refreshSignal = 0 }: LogsViewProps): ReactElement {
   const [logs, setLogs] = useState<WorkLogEntry[]>([])
   const [loading, setLoading] = useState(false)
   const [query, setQuery] = useState('')
@@ -35,7 +39,7 @@ export function LogsView(): ReactElement {
 
   useEffect(() => {
     void loadLogs()
-  }, [loadLogs])
+  }, [loadLogs, refreshSignal])
 
   const harnesses = useMemo(() => {
     const set = new Set<string>()

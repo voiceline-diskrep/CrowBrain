@@ -74,4 +74,50 @@ describe('SyncManager helpers', () => {
     )
     expect(normalizeGitRepoUrl('')).toBe('')
   })
+
+  it('respects project deletion tombstones and propagates renames by updatedAt', () => {
+    const merged = mergeManifestProjects(
+      [
+        {
+          id: 'proj-1',
+          name: 'Renamed App',
+          slug: 'original-app',
+          vaultPath: 'C:\\vaults\\original-app',
+          createdAt: 100,
+          updatedAt: 500,
+          pinned: true
+        }
+      ],
+      {
+        version: 1,
+        updatedAt: 400,
+        projects: [
+          {
+            id: 'proj-1',
+            name: 'Original App',
+            slug: 'original-app',
+            createdAt: 100,
+            updatedAt: 200,
+            pinned: false
+          },
+          {
+            id: 'proj-deleted',
+            name: 'Old Project',
+            slug: 'old-project',
+            createdAt: 50,
+            updatedAt: 100
+          }
+        ]
+      },
+      ['proj-deleted']
+    )
+
+    const p1 = merged.find((p) => p.id === 'proj-1')
+    const pDel = merged.find((p) => p.id === 'proj-deleted')
+    expect(p1?.name).toBe('Renamed App')
+    expect(p1?.slug).toBe('original-app')
+    expect(p1?.pinned).toBe(true)
+    expect(p1?.deleted).toBeFalsy()
+    expect(pDel?.deleted).toBe(true)
+  })
 })

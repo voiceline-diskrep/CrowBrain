@@ -38,8 +38,9 @@ export async function authenticateWithGoogle(
   const state = base64UrlEncode(crypto.randomBytes(16))
 
   let server: http.Server | null = null
+  let boundRedirectUri = ''
 
-  const authCode = await new Promise<string>((resolve, reject) => {
+  const authCode = await new Promise<{ code: string; redirectUri: string }>((resolve, reject) => {
     const timeout = setTimeout(() => {
       server?.close()
       reject(new Error('Google sign-in timed out after 3 minutes.'))
@@ -76,10 +77,11 @@ export async function authenticateWithGoogle(
       }
 
       clearTimeout(timeout)
+      const redirectUri = boundRedirectUri
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
       res.end('<h3>CrowBrain connected to Google Drive. You can close this tab.</h3>')
       server?.close()
-      resolve(code)
+      resolve({ code, redirectUri })
     })
 
     server.listen(0, '127.0.0.1', () => {
@@ -89,10 +91,10 @@ export async function authenticateWithGoogle(
         reject(new Error('Failed to start local OAuth callback server.'))
         return
       }
-      const redirectUri = `http://127.0.0.1:${address.port}/oauth2callback`
+      boundRedirectUri = `http://127.0.0.1:${address.port}/oauth2callback`
       const authUrl = new URL('https://accounts.google.com/o/oauth2/v2/auth')
       authUrl.searchParams.set('client_id', trimmedId)
-      authUrl.searchParams.set('redirect_uri', redirectUri)
+      authUrl.searchParams.set('redirect_uri', boundRedirectUri)
       authUrl.searchParams.set('response_type', 'code')
       authUrl.searchParams.set(
         'scope',
@@ -106,10 +108,6 @@ export async function authenticateWithGoogle(
 
       void shell.openExternal(authUrl.toString())
     })
-  }).then(async (code) => {
-    const address = server?.address()
-    const port = address && typeof address !== 'string' ? address.port : 0
-    return { code, redirectUri: `http://127.0.0.1:${port}/oauth2callback` }
   })
 
   const body = new URLSearchParams({

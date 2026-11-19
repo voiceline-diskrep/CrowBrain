@@ -1,10 +1,12 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ReactElement } from 'react'
+import { Download, ExternalLink, X } from 'lucide-react'
 import type {
   AppSettings,
   CustomThemeTokens,
   GitSyncStatus,
   SyncStatus,
+  UpdateCheckResult,
   VaultNote
 } from '@shared/types'
 import { BackupsView } from './components/BackupsView'
@@ -69,13 +71,21 @@ export function App(): ReactElement {
   const [notes, setNotes] = useState<VaultNote[]>([])
   const [selectedNotePath, setSelectedNotePath] = useState<string | null>(null)
   const [mcpRunning, setMcpRunning] = useState<boolean>(false)
-  const [mcpPort, setMcpPort] = useState<number>(3842)
-  const [appVersion, setAppVersion] = useState<string>('0.6.0')
+  const [mcpPort, setMcpPort] = useState<number>(3345)
+  const [appVersion, setAppVersion] = useState<string>('0.6.1')
   const [syncStatus, setSyncStatus] = useState<SyncStatus>({ connected: false, state: 'idle' })
   const [gitSyncStatus, setGitSyncStatus] = useState<GitSyncStatus>({
     configured: false,
     state: 'idle'
   })
+  const [availableUpdate, setAvailableUpdate] = useState<UpdateCheckResult | null>(null)
+  const [backupsRevision, setBackupsRevision] = useState<number>(0)
+  const [logsRevision, setLogsRevision] = useState<number>(0)
+  const activeProjectIdRef = useRef<string>(settings.activeProjectId)
+
+  useEffect(() => {
+    activeProjectIdRef.current = settings.activeProjectId
+  }, [settings.activeProjectId])
 
   const refreshNotes = useCallback(async () => {
     try {
@@ -131,10 +141,27 @@ export function App(): ReactElement {
         void refreshNotes()
       }
     })
+    const unsubscribeVaultChange = window.crowbrain.onVaultChange((event) => {
+      if (event.projectId !== activeProjectIdRef.current) return
+      if (event.kind === 'backups') {
+        setBackupsRevision((r) => r + 1)
+      } else if (event.kind === 'logs') {
+        setLogsRevision((r) => r + 1)
+      } else {
+        void refreshNotes()
+      }
+    })
+    const unsubscribeUpdate = window.crowbrain.onUpdateAvailable((result) => {
+      if (result.hasUpdate) {
+        setAvailableUpdate(result)
+      }
+    })
     return () => {
       mounted = false
       unsubscribeSync()
       unsubscribeGitSync()
+      unsubscribeVaultChange()
+      unsubscribeUpdate()
     }
   }, [refreshNotes, refreshStatus])
 
@@ -159,6 +186,9 @@ export function App(): ReactElement {
     try {
       const updated = await window.crowbrain.setSettings(partial)
       setSettings(updated)
+      if (typeof partial.mcpPort === 'number') {
+        await refreshStatus()
+      }
     } catch (err) {
       console.error('Failed to update settings:', err)
     }
@@ -281,10 +311,54 @@ export function App(): ReactElement {
         mcpPort={mcpPort}
       />
 
-      <main className="flex-1 min-w-0 h-full overflow-hidden">
-        <div key={activeTab} className="h-full cb-view-enter">
+      <main className="flex-1 min-w-0 h-full flex flex-col overflow-hidden">
+        {availableUpdate && (
+          <div
+            className="px-4 py-2 flex items-center justify-between gap-3 text-xs shrink-0"
+            style={{
+              backgroundColor: 'var(--cb-surface-alt)',
+              borderBottom: '1px solid var(--cb-border)',
+              color: 'var(--cb-text)'
+            }}
+          >
+            <div className="flex items-center gap-2 min-w-0">
+              <Download size={13} className="shrink-0" />
+              <span className="truncate">
+                Update available: v{availableUpdate.latestVersion} (current v
+                {availableUpdate.currentVersion})
+              </span>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              {availableUpdate.releaseUrl && (
+                <a
+                  href={availableUpdate.releaseUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded font-medium"
+                  style={{
+                    backgroundColor: 'var(--cb-accent)',
+                    color: 'var(--cb-accent-text)'
+                  }}
+                >
+                  <span>Download</span>
+                  <ExternalLink size={11} />
+                </a>
+              )}
+              <button
+                type="button"
+                onClick={() => setAvailableUpdate(null)}
+                title="Dismiss"
+                className="p-0.5 rounded cursor-pointer opacity-70 hover:opacity-100"
+              >
+                <X size={13} />
+              </button>
+            </div>
+          </div>
+        )}
+        <div key={activeTab} className="flex-1 min-h-0 cb-view-enter">
           {activeTab === 'branches' && (
             <BranchesView
+              key={settings.activeProjectId}
               notes={notes}
               selectedNotePath={selectedNotePath}
               onSelectNotePath={setSelectedNotePath}
@@ -292,13 +366,21 @@ export function App(): ReactElement {
             />
           )}
 
-          {activeTab === 'backups' && <BackupsView key={settings.activeProjectId} />}
+          {activeTab === 'backups' && (
+            <BackupsView key={settings.activeProjectId} refreshSignal={backupsRevision} />
+          )}
 
-          {activeTab === 'logs' && <LogsView key={settings.activeProjectId} />}
+          {activeTab === 'logs' && (
+            <LogsView key={settings.activeProjectId} refreshSignal={logsRevision} />
+          )}
 
-          {activeTab === 'system-map' && <SystemMapView onRefreshNotes={refreshNotes} />}
+          {activeTab === 'system-map' && (
+            <SystemMapView key={settings.activeProjectId} onRefreshNotes={refreshNotes} />
+          )}
 
-          {activeTab === 'rules' && <RulesView onRefreshNotes={refreshNotes} />}
+          {activeTab === 'rules' && (
+            <RulesView key={settings.activeProjectId} onRefreshNotes={refreshNotes} />
+          )}
 
           {activeTab === 'mcp' && (
             <McpConnectView

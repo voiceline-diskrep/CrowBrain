@@ -33,10 +33,11 @@ export function RulesView({ onRefreshNotes }: RulesViewProps): ReactElement {
       setGlobalDraft(data.globalRules)
       setChatDraft(data.chatRules)
       if (data.contextNotes.length > 0) {
-        const current =
-          data.contextNotes.find((c) => c.name === selectedContextName) ?? data.contextNotes[0]
-        setSelectedContextName(current.name)
-        setContextDraft(current.content)
+        setSelectedContextName((prev) => {
+          const current = data.contextNotes.find((c) => c.name === prev) ?? data.contextNotes[0]
+          setContextDraft(current.content)
+          return current.name
+        })
       } else {
         setSelectedContextName(null)
         setContextDraft('')
@@ -46,7 +47,7 @@ export function RulesView({ onRefreshNotes }: RulesViewProps): ReactElement {
     } finally {
       setLoading(false)
     }
-  }, [selectedContextName])
+  }, [])
 
   useEffect(() => {
     void loadRules()

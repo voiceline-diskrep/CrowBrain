@@ -1,13 +1,16 @@
 import fs from 'fs'
 import os from 'os'
 import path from 'path'
-import { app } from 'electron'
+import { app, safeStorage } from 'electron'
 import type {
   AppSettings,
   CustomThemeTokens,
   GitSyncConfig,
-  GoogleDriveConfig
+  GoogleDriveConfig,
+  ProjectEntry
 } from '@shared/types'
+
+const SECRET_PREFIX = 'enc:'
 
 const DEFAULT_GOOGLE_DRIVE: GoogleDriveConfig = {
   clientId: '',
@@ -25,6 +28,49 @@ const DEFAULT_CUSTOM_THEME: CustomThemeTokens = {
   textMuted: '#8e8e93',
   accent: '#e4e4e7',
   accentText: '#0a0a0a'
+}
+
+function makeSlug(name: string, fallbackId: string): string {
+  const slug = name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+  return slug || fallbackId
+}
+
+function normalizeProject(p: ProjectEntry): ProjectEntry {
+  return {
+    ...p,
+    slug: p.slug?.trim() || makeSlug(p.name, p.id),
+    updatedAt: p.updatedAt ?? p.createdAt
+  }
+}
+
+function encryptSecret(value?: string): string | undefined {
+  if (!value) return value
+  if (value.startsWith(SECRET_PREFIX)) return value
+  try {
+    if (safeStorage && typeof safeStorage.isEncryptionAvailable === 'function' && safeStorage.isEncryptionAvailable()) {
+      return `${SECRET_PREFIX}${safeStorage.encryptString(value).toString('base64')}`
+    }
+  } catch {
+    // Fallback when running outside Electron (e.g. unit tests)
+  }
+  return value
+}
+
+function decryptSecret(value?: string): string | undefined {
+  if (!value) return value
+  if (!value.startsWith(SECRET_PREFIX)) return value
+  try {
+    if (safeStorage && typeof safeStorage.isEncryptionAvailable === 'function' && safeStorage.isEncryptionAvailable()) {
+      const buf = Buffer.from(value.slice(SECRET_PREFIX.length), 'base64')
+      return safeStorage.decryptString(buf)
+    }
+  } catch {
+    return ''
+  }
+  return ''
 }
 
 function resolveDefaultVaultPath(): string {
@@ -54,16 +100,20 @@ export class SettingsManager {
       autoSync: false,
       syncIntervalSeconds: 60
     }
+    const now = Date.now()
     this.defaults = {
       vaultPath: initialVault,
       projects: [
         {
           id: 'default',
           name: 'Default',
+          slug: 'default',
           vaultPath: initialVault,
-          createdAt: Date.now()
+          createdAt: now,
+          updatedAt: now
         }
       ],
+      deletedProjectIds: [],
       activeProjectId: 'default',
       theme: 'dark',
       customTheme: { ...DEFAULT_CUSTOM_THEME },
@@ -80,6 +130,7 @@ export class SettingsManager {
     return {
       ...this.settings,
       projects: this.settings.projects.map((p) => ({ ...p })),
+      deletedProjectIds: [...(this.settings.deletedProjectIds ?? [])],
       customTheme: { ...this.settings.customTheme },
       googleDrive: { ...this.settings.googleDrive },
       gitSync: { ...this.settings.gitSync }
@@ -91,8 +142,11 @@ export class SettingsManager {
       ...this.settings,
       ...partial,
       projects: partial.projects
-        ? partial.projects.map((p) => ({ ...p }))
+        ? partial.projects.map((p) => normalizeProject({ ...p }))
         : this.settings.projects.map((p) => ({ ...p })),
+      deletedProjectIds: partial.deletedProjectIds
+        ? Array.from(new Set(partial.deletedProjectIds))
+        : [...(this.settings.deletedProjectIds ?? [])],
       customTheme: {
         ...this.settings.customTheme,
         ...(partial.customTheme ?? {})
@@ -117,35 +171,45 @@ export class SettingsManager {
         const raw = fs.readFileSync(this.settingsFile, 'utf-8')
         const parsed = JSON.parse(raw) as Partial<AppSettings>
         const vaultPath = parsed.vaultPath || this.defaults.vaultPath
-        const projects =
+        const rawProjects =
           Array.isArray(parsed.projects) && parsed.projects.length > 0
             ? parsed.projects
             : [
                 {
                   id: 'default',
                   name: path.basename(vaultPath) || 'Default',
+                  slug: 'default',
                   vaultPath,
                   createdAt: Date.now()
                 }
               ]
+        const projects = rawProjects.map((p) => normalizeProject(p))
         const activeProjectId =
           parsed.activeProjectId && projects.some((p) => p.id === parsed.activeProjectId)
             ? parsed.activeProjectId
             : projects[0].id
+        const gd = {
+          ...DEFAULT_GOOGLE_DRIVE,
+          ...(parsed.googleDrive ?? {})
+        }
+        gd.clientSecret = decryptSecret(gd.clientSecret)
+        gd.refreshToken = decryptSecret(gd.refreshToken)
+        gd.accessToken = decryptSecret(gd.accessToken)
+
         return {
           ...this.defaults,
           ...parsed,
           vaultPath,
           projects,
+          deletedProjectIds: Array.isArray(parsed.deletedProjectIds)
+            ? Array.from(new Set(parsed.deletedProjectIds))
+            : [],
           activeProjectId,
           customTheme: {
             ...this.defaults.customTheme,
             ...(parsed.customTheme ?? {})
           },
-          googleDrive: {
-            ...DEFAULT_GOOGLE_DRIVE,
-            ...(parsed.googleDrive ?? {})
-          },
+          googleDrive: gd,
           gitSync: {
             ...this.defaults.gitSync,
             ...(parsed.gitSync ?? {})
@@ -158,6 +222,7 @@ export class SettingsManager {
     return {
       ...this.defaults,
       projects: this.defaults.projects.map((p) => ({ ...p })),
+      deletedProjectIds: [],
       customTheme: { ...this.defaults.customTheme },
       googleDrive: { ...DEFAULT_GOOGLE_DRIVE },
       gitSync: { ...this.defaults.gitSync }
@@ -167,6 +232,15 @@ export class SettingsManager {
   private persist(): void {
     const dir = path.dirname(this.settingsFile)
     fs.mkdirSync(dir, { recursive: true })
-    fs.writeFileSync(this.settingsFile, JSON.stringify(this.settings, null, 2), 'utf-8')
+    const toWrite: AppSettings = {
+      ...this.settings,
+      googleDrive: {
+        ...this.settings.googleDrive,
+        clientSecret: encryptSecret(this.settings.googleDrive.clientSecret),
+        refreshToken: encryptSecret(this.settings.googleDrive.refreshToken),
+        accessToken: encryptSecret(this.settings.googleDrive.accessToken)
+      }
+    }
+    fs.writeFileSync(this.settingsFile, JSON.stringify(toWrite, null, 2), 'utf-8')
   }
 }

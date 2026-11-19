@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js'
 import { z } from 'zod'
-import type { AgentActivityEvent } from '@shared/types'
+import type { AgentActivityEvent, VaultChangeEvent } from '@shared/types'
 import type { ProjectRuntime } from '../vault/ProjectPool'
 
 export interface ProjectSummary {
@@ -17,6 +17,7 @@ export interface CrowBrainMcpServerOptions {
   resolveProject: (projectRef?: string) => ProjectRuntime
   listProjects: () => ProjectSummary[]
   onActivity?: (event: AgentActivityEvent) => void
+  onVaultChange?: (event: VaultChangeEvent) => void
   version?: string
 }
 
@@ -29,6 +30,7 @@ export class CrowBrainMcpServer {
   private readonly resolveProject: (projectRef?: string) => ProjectRuntime
   private readonly listProjects: () => ProjectSummary[]
   private readonly onActivity?: (event: AgentActivityEvent) => void
+  private readonly onVaultChange?: (event: VaultChangeEvent) => void
   private readonly version: string
   private httpServer: http.Server | null = null
   private sessions = new Map<string, SseSession>()
@@ -39,7 +41,8 @@ export class CrowBrainMcpServer {
     this.resolveProject = options.resolveProject
     this.listProjects = options.listProjects
     this.onActivity = options.onActivity
-    this.version = options.version ?? '0.4.0'
+    this.onVaultChange = options.onVaultChange
+    this.version = options.version ?? '0.6.1'
   }
 
   isRunning(): boolean {
@@ -128,6 +131,7 @@ export class CrowBrainMcpServer {
           `Saved backup ${saved.id}`,
           runtime.project.name
         )
+        this.onVaultChange?.({ projectId: runtime.project.id, kind: 'backups' })
         return {
           content: [{ type: 'text', text: JSON.stringify(saved, null, 2) }]
         }
@@ -202,6 +206,7 @@ export class CrowBrainMcpServer {
           'Updated system-map.md',
           runtime.project.name
         )
+        this.onVaultChange?.({ projectId: runtime.project.id, kind: 'system-map' })
         return {
           content: [{ type: 'text', text: updated }]
         }
@@ -286,6 +291,7 @@ export class CrowBrainMcpServer {
         const runtime = getRuntime(args.project)
         const note = await runtime.vault.saveNote(args.relPath, args.content, args.frontmatter)
         this.emitActivity('mcp-client', 'write_note', note.path, runtime.project.name)
+        this.onVaultChange?.({ projectId: runtime.project.id, kind: 'notes' })
         return {
           content: [{ type: 'text', text: JSON.stringify(note, null, 2) }]
         }
@@ -314,6 +320,7 @@ export class CrowBrainMcpServer {
           `${args.source} -> ${args.target}`,
           runtime.project.name
         )
+        this.onVaultChange?.({ projectId: runtime.project.id, kind: 'notes' })
         return {
           content: [{ type: 'text', text: JSON.stringify(updated, null, 2) }]
         }
@@ -385,6 +392,7 @@ export class CrowBrainMcpServer {
           `${saved.category}: ${saved.title}`,
           runtime.project.name
         )
+        this.onVaultChange?.({ projectId: runtime.project.id, kind: 'logs' })
         return {
           content: [{ type: 'text', text: JSON.stringify(saved, null, 2) }]
         }

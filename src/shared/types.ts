@@ -86,6 +86,8 @@ export interface ProjectEntry {
   name: string
   vaultPath: string
   createdAt: number
+  updatedAt?: number
+  slug?: string
   pinned?: boolean
 }
 
@@ -130,6 +132,7 @@ export interface SyncStatus {
 export interface AppSettings {
   vaultPath: string
   projects: ProjectEntry[]
+  deletedProjectIds?: string[]
   activeProjectId: string
   theme: ThemeMode
   customTheme: CustomThemeTokens
@@ -138,6 +141,11 @@ export interface AppSettings {
   checkUpdatesOnStartup: boolean
   googleDrive: GoogleDriveConfig
   gitSync: GitSyncConfig
+}
+
+export interface VaultChangeEvent {
+  projectId: string
+  kind: 'notes' | 'backups' | 'logs' | 'rules' | 'system-map'
 }
 
 export interface UpdateCheckResult {
@@ -168,6 +176,7 @@ export const IPC_CHANNELS = {
   VAULT_GET_GRAPH: 'vault:get-graph',
   VAULT_GET_RULES: 'vault:get-rules',
   VAULT_SELECT_DIRECTORY: 'vault:select-directory',
+  VAULT_ON_CHANGE: 'vault:on-change',
 
   // Backup operations
   BACKUP_GET_MESSAGES: 'backup:get-messages',
@@ -196,6 +205,7 @@ export const IPC_CHANNELS = {
   APP_GET_VERSION: 'app:get-version',
   APP_CHECK_UPDATES: 'app:check-updates',
   APP_GET_STATUS: 'app:get-status',
+  APP_ON_UPDATE: 'app:on-update',
 
   // Cloud sync
   SYNC_GET_STATUS: 'sync:get-status',

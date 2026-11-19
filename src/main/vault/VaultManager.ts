@@ -37,6 +37,7 @@ Structural reference maintained by AI agents for the CrowBrain vault and active 
 
 - branches/ - Knowledge notes and topic branches connected with [[wikilinks]].
 - backups/ - Daily JSONL message backups (YYYY-MM-DD.jsonl) with summaries for future sessions.
+- logs/ - Daily JSONL work logs (YYYY-MM-DD.jsonl) documenting updates, fixes, and releases.
 - rules/global-rules.md - Persistent rules applied across all sessions.
 - rules/chat-rules.md - Conversation and workflow rules.
 - rules/context/ - Topic-specific and project-specific context notes.
@@ -67,9 +68,12 @@ export class VaultManager {
   private vaultPath: string
   private notes: Map<string, VaultNote> = new Map()
   private watcher: FSWatcher | null = null
+  private changeTimer: NodeJS.Timeout | null = null
+  private readonly onChange?: (kind: 'notes' | 'rules' | 'system-map') => void
 
-  constructor(vaultPath: string) {
+  constructor(vaultPath: string, onChange?: (kind: 'notes' | 'rules' | 'system-map') => void) {
     this.vaultPath = path.resolve(vaultPath)
+    this.onChange = onChange
   }
 
   getVaultPath(): string {
@@ -84,6 +88,10 @@ export class VaultManager {
   }
 
   async close(): Promise<void> {
+    if (this.changeTimer) {
+      clearTimeout(this.changeTimer)
+      this.changeTimer = null
+    }
     if (this.watcher) {
       await this.watcher.close()
       this.watcher = null
@@ -355,6 +363,7 @@ export class VaultManager {
       this.vaultPath,
       path.join(this.vaultPath, 'branches'),
       path.join(this.vaultPath, 'backups'),
+      path.join(this.vaultPath, 'logs'),
       path.join(this.vaultPath, 'rules'),
       path.join(this.vaultPath, 'rules', 'context')
     ]
@@ -408,8 +417,14 @@ export class VaultManager {
       return null
     }
 
-    const raw = fs.readFileSync(fullPath, 'utf-8')
-    const stat = fs.statSync(fullPath)
+    let raw: string
+    let stat: fs.Stats
+    try {
+      raw = fs.readFileSync(fullPath, 'utf-8')
+      stat = fs.statSync(fullPath)
+    } catch {
+      return null
+    }
     const relPath = normalizeRelPath(path.relative(this.vaultPath, fullPath))
     const dirName = path.posix.dirname(relPath)
     const folder = dirName === '.' ? '' : dirName
@@ -456,6 +471,20 @@ export class VaultManager {
     return this.getNote(target)
   }
 
+  private notifyFileChange(filePath: string): void {
+    if (!this.onChange) return
+    const rel = normalizeRelPath(path.relative(this.vaultPath, filePath)).toLowerCase()
+    const kind: 'notes' | 'rules' | 'system-map' =
+      rel === 'system-map.md' ? 'system-map' : rel.startsWith('rules/') ? 'rules' : 'notes'
+    if (this.changeTimer) {
+      clearTimeout(this.changeTimer)
+    }
+    this.changeTimer = setTimeout(() => {
+      this.changeTimer = null
+      this.onChange?.(kind)
+    }, 250)
+  }
+
   private startWatcher(): void {
     this.watcher = chokidar.watch(this.vaultPath, {
       ignored: (watchedPath) => shouldIgnorePath(watchedPath),
@@ -466,12 +495,14 @@ export class VaultManager {
     this.watcher.on('add', (filePath) => {
       if (this.indexFile(filePath)) {
         this.recomputeBacklinks()
+        this.notifyFileChange(filePath)
       }
     })
 
     this.watcher.on('change', (filePath) => {
       if (this.indexFile(filePath)) {
         this.recomputeBacklinks()
+        this.notifyFileChange(filePath)
       }
     })
 
@@ -479,6 +510,7 @@ export class VaultManager {
       const relPath = normalizeRelPath(path.relative(this.vaultPath, filePath))
       if (this.notes.delete(relPath)) {
         this.recomputeBacklinks()
+        this.notifyFileChange(filePath)
       }
     })
   }
@@ -493,7 +525,12 @@ export class VaultManager {
       ? this.vaultPath
       : `${this.vaultPath}${path.sep}`
 
-    if (resolved !== this.vaultPath && !resolved.startsWith(vaultPrefix)) {
+    const isWindows = process.platform === 'win32'
+    const normalizedResolved = isWindows ? resolved.toLowerCase() : resolved
+    const normalizedVault = isWindows ? this.vaultPath.toLowerCase() : this.vaultPath
+    const normalizedPrefix = isWindows ? vaultPrefix.toLowerCase() : vaultPrefix
+
+    if (normalizedResolved !== normalizedVault && !normalizedResolved.startsWith(normalizedPrefix)) {
       throw new Error(`Path escapes vault directory: ${relPath}`)
     }
     return resolved

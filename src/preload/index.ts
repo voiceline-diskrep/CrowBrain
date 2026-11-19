@@ -9,6 +9,7 @@ import {
   type RulesData,
   type SyncStatus,
   type UpdateCheckResult,
+  type VaultChangeEvent,
   type VaultNote,
   type WorkLogEntry
 } from '@shared/types'
@@ -73,6 +74,8 @@ export interface CrowBrainApi {
   runGitSyncNow: () => Promise<GitSyncStatus>
   selectGitSyncRoot: () => Promise<string | null>
   onGitSyncStatus: (cb: (status: GitSyncStatus) => void) => () => void
+  onVaultChange: (cb: (event: VaultChangeEvent) => void) => () => void
+  onUpdateAvailable: (cb: (result: UpdateCheckResult) => void) => () => void
 }
 
 const crowbrainApi: CrowBrainApi = {
@@ -139,6 +142,24 @@ const crowbrainApi: CrowBrainApi = {
     ipcRenderer.on(IPC_CHANNELS.GIT_SYNC_ON_STATUS, listener)
     return () => {
       ipcRenderer.removeListener(IPC_CHANNELS.GIT_SYNC_ON_STATUS, listener)
+    }
+  },
+  onVaultChange: (cb) => {
+    const listener = (_event: IpcRendererEvent, payload: VaultChangeEvent): void => {
+      cb(payload)
+    }
+    ipcRenderer.on(IPC_CHANNELS.VAULT_ON_CHANGE, listener)
+    return () => {
+      ipcRenderer.removeListener(IPC_CHANNELS.VAULT_ON_CHANGE, listener)
+    }
+  },
+  onUpdateAvailable: (cb) => {
+    const listener = (_event: IpcRendererEvent, payload: UpdateCheckResult): void => {
+      cb(payload)
+    }
+    ipcRenderer.on(IPC_CHANNELS.APP_ON_UPDATE, listener)
+    return () => {
+      ipcRenderer.removeListener(IPC_CHANNELS.APP_ON_UPDATE, listener)
     }
   }
 }

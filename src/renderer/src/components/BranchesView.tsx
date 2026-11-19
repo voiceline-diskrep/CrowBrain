@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { MouseEvent, ReactElement, WheelEvent } from 'react'
+import type { MouseEvent, ReactElement } from 'react'
 import {
   Eye,
   FilePlus,
@@ -142,6 +142,10 @@ export function BranchesView({
   // Pan & zoom state
   const [pan, setPan] = useState({ x: 0, y: 0 })
   const [zoom, setZoom] = useState(1)
+  const [svgSize, setSvgSize] = useState({ width: 560, height: 520 })
+  const svgContainerRef = useRef<HTMLDivElement | null>(null)
+  const svgRef = useRef<SVGSVGElement | null>(null)
+  const didDragRef = useRef<boolean>(false)
   const dragRef = useRef<{
     type: 'pan' | 'node'
     nodeId?: string
@@ -187,6 +191,35 @@ export function BranchesView({
   useEffect(() => {
     void loadGraph()
   }, [loadGraph, notes])
+
+  // Track SVG container size so graph stays centered in Split and Graph modes
+  useEffect(() => {
+    const el = svgContainerRef.current
+    if (!el || typeof ResizeObserver === 'undefined') return
+    const updateSize = (): void => {
+      const rect = el.getBoundingClientRect()
+      if (rect.width > 0 && rect.height > 0) {
+        setSvgSize({ width: rect.width, height: rect.height })
+      }
+    }
+    updateSize()
+    const observer = new ResizeObserver(updateSize)
+    observer.observe(el)
+    return () => observer.disconnect()
+  }, [layoutMode])
+
+  // Non-passive wheel listener to zoom smoothly without browser console warnings
+  useEffect(() => {
+    const svg = svgRef.current
+    if (!svg) return
+    const onWheel = (e: globalThis.WheelEvent): void => {
+      e.preventDefault()
+      const factor = e.deltaY < 0 ? 1.1 : 0.9
+      setZoom((prev) => Math.max(0.25, Math.min(3, Number((prev * factor).toFixed(2)))))
+    }
+    svg.addEventListener('wheel', onWheel, { passive: false })
+    return () => svg.removeEventListener('wheel', onWheel)
+  }, [layoutMode, graph.nodes.length])
 
   // Load selected note details
   useEffect(() => {
@@ -261,6 +294,7 @@ export function BranchesView({
 
   const handleNodeMouseDown = (e: MouseEvent<SVGGElement>, node: PositionedNode): void => {
     e.stopPropagation()
+    didDragRef.current = false
     dragRef.current = {
       type: 'node',
       nodeId: node.id,
@@ -276,6 +310,9 @@ export function BranchesView({
     if (!drag) return
     const dx = e.clientX - drag.startX
     const dy = e.clientY - drag.startY
+    if (Math.hypot(dx, dy) > 4) {
+      didDragRef.current = true
+    }
     if (drag.type === 'pan') {
       setPan({ x: drag.origX + dx, y: drag.origY + dy })
     } else if (drag.type === 'node' && drag.nodeId) {
@@ -294,10 +331,12 @@ export function BranchesView({
     dragRef.current = null
   }
 
-  const handleWheel = (e: WheelEvent<SVGSVGElement>): void => {
-    e.preventDefault()
-    const factor = e.deltaY < 0 ? 1.1 : 0.9
-    setZoom((prev) => Math.max(0.25, Math.min(3, Number((prev * factor).toFixed(2)))))
+  const safeSelectNotePath = (nextPath: string | null): void => {
+    if (nextPath === selectedNotePath) return
+    if (isDirty && !window.confirm('Discard unsaved changes to this note?')) {
+      return
+    }
+    onSelectNotePath(nextPath)
   }
 
   const resetView = (): void => {
@@ -334,9 +373,13 @@ export function BranchesView({
 
   const handleDeleteNote = async (): Promise<void> => {
     if (!activeNote) return
+    if (!window.confirm(`Delete "${activeNote.title}" permanently?`)) {
+      return
+    }
     try {
       const ok = await window.crowbrain.deleteNote(activeNote.path)
       if (ok) {
+        setIsDirty(false)
         onSelectNotePath(null)
         await onRefreshNotes()
         await loadGraph()
@@ -377,7 +420,7 @@ export function BranchesView({
   const handleWikilinkClick = async (target: string): Promise<void> => {
     const found = await window.crowbrain.getNote(target)
     if (found) {
-      onSelectNotePath(found.path)
+      safeSelectNotePath(found.path)
     } else {
       setStatusMessage(`Linked note not found: ${target}`)
     }
@@ -459,6 +502,7 @@ export function BranchesView({
         {/* Graph Pane */}
         {layoutMode !== 'editor' && (
           <div
+            ref={svgContainerRef}
             className={`relative min-h-0 overflow-hidden ${
               layoutMode === 'split' ? 'w-1/2' : 'w-full'
             }`}
@@ -544,14 +588,16 @@ export function BranchesView({
               </div>
             ) : (
               <svg
+                ref={svgRef}
                 className="w-full h-full cursor-grab active:cursor-grabbing"
                 onMouseDown={handleSvgMouseDown}
                 onMouseMove={handleSvgMouseMove}
                 onMouseUp={handleSvgMouseUp}
                 onMouseLeave={handleSvgMouseUp}
-                onWheel={handleWheel}
               >
-                <g transform={`translate(${pan.x + 280}, ${pan.y + 260}) scale(${zoom})`}>
+                <g
+                  transform={`translate(${pan.x + svgSize.width / 2}, ${pan.y + svgSize.height / 2}) scale(${zoom})`}
+                >
                   {/* Edges */}
                   {graph.edges.map((edge, index) => {
                     const src = positionMap.get(edge.source)
@@ -589,7 +635,11 @@ export function BranchesView({
                         onMouseLeave={() => setHoveredNodeId(null)}
                         onClick={(e) => {
                           e.stopPropagation()
-                          onSelectNotePath(node.path)
+                          if (didDragRef.current) {
+                            didDragRef.current = false
+                            return
+                          }
+                          safeSelectNotePath(node.path)
                         }}
                         className="cursor-pointer"
                         style={{ opacity: isHighlighted ? 1 : 0.3 }}

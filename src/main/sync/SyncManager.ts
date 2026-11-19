@@ -1,5 +1,6 @@
 import crypto from 'node:crypto'
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import type { ProjectEntry, SyncStatus } from '@shared/types'
 import type { SettingsManager } from '../settings'
@@ -17,6 +18,9 @@ export interface PortableProjectManifestItem {
   name: string
   slug: string
   createdAt: number
+  updatedAt?: number
+  pinned?: boolean
+  deleted?: boolean
 }
 
 export interface PortableManifest {
@@ -90,8 +94,10 @@ export function mergeJsonlContent(localText: string, remoteText: string): JsonlM
 
 export function mergeManifestProjects(
   localProjects: ProjectEntry[],
-  remoteManifest: PortableManifest | null
+  remoteManifest: PortableManifest | null,
+  deletedProjectIds: string[] = []
 ): PortableProjectManifestItem[] {
+  const deletedSet = new Set(deletedProjectIds)
   const merged = new Map<string, PortableProjectManifestItem>()
 
   for (const remote of remoteManifest?.projects ?? []) {
@@ -99,12 +105,47 @@ export function mergeManifestProjects(
   }
 
   for (const local of localProjects) {
-    if (!merged.has(local.id)) {
+    if (deletedSet.has(local.id)) continue
+    const localSlug = local.slug?.trim() || slugifyProjectName(local.name, local.id)
+    const localUpdatedAt = local.updatedAt ?? local.createdAt
+    const existing = merged.get(local.id)
+
+    if (!existing) {
       merged.set(local.id, {
         id: local.id,
         name: local.name,
-        slug: slugifyProjectName(local.name, local.id),
-        createdAt: local.createdAt
+        slug: localSlug,
+        createdAt: local.createdAt,
+        updatedAt: localUpdatedAt,
+        pinned: Boolean(local.pinned),
+        deleted: false
+      })
+    } else if (!existing.deleted) {
+      const remoteUpdatedAt = existing.updatedAt ?? existing.createdAt
+      if (localUpdatedAt >= remoteUpdatedAt) {
+        merged.set(local.id, {
+          ...existing,
+          name: local.name,
+          slug: existing.slug || localSlug,
+          updatedAt: localUpdatedAt,
+          pinned: Boolean(local.pinned)
+        })
+      }
+    }
+  }
+
+  for (const delId of deletedSet) {
+    const existing = merged.get(delId)
+    if (existing) {
+      merged.set(delId, { ...existing, deleted: true, updatedAt: Date.now() })
+    } else {
+      merged.set(delId, {
+        id: delId,
+        name: delId,
+        slug: delId,
+        createdAt: 0,
+        updatedAt: Date.now(),
+        deleted: true
       })
     }
   }
@@ -269,28 +310,72 @@ export class SyncManager {
         }
       }
 
-      const mergedItems = mergeManifestProjects(initialSettings.projects, remoteManifest)
-      const projectsBaseDir = path.join(path.dirname(initialSettings.vaultPath), 'CrowBrainProjects')
+      const mergedItems = mergeManifestProjects(
+        initialSettings.projects,
+        remoteManifest,
+        initialSettings.deletedProjectIds ?? []
+      )
+      const projectsBaseDir =
+        initialSettings.gitSync.syncRootPath ||
+        path.join(os.homedir(), 'Documents', 'CrowBrainProjects')
 
-      const updatedLocalProjects: ProjectEntry[] = [...initialSettings.projects]
-      let addedNewProjects = false
+      const activeItems = mergedItems.filter((item) => !item.deleted)
+      const deletedIds = new Set(
+        mergedItems.filter((item) => item.deleted).map((item) => item.id)
+      )
 
-      for (const item of mergedItems) {
+      const updatedLocalProjects: ProjectEntry[] = []
+      let projectsChanged = false
+
+      for (const local of initialSettings.projects) {
+        if (deletedIds.has(local.id)) {
+          projectsChanged = true
+          continue
+        }
+        const match = activeItems.find((m) => m.id === local.id)
+        if (match) {
+          if (match.name !== local.name || Boolean(match.pinned) !== Boolean(local.pinned)) {
+            projectsChanged = true
+          }
+          updatedLocalProjects.push({
+            ...local,
+            name: match.name,
+            slug: match.slug,
+            pinned: Boolean(match.pinned),
+            updatedAt: match.updatedAt ?? local.updatedAt
+          })
+        } else {
+          updatedLocalProjects.push(local)
+        }
+      }
+
+      for (const item of activeItems) {
         if (!updatedLocalProjects.some((p) => p.id === item.id)) {
           const localPath = path.join(projectsBaseDir, item.slug)
           fs.mkdirSync(localPath, { recursive: true })
           updatedLocalProjects.push({
             id: item.id,
             name: item.name,
+            slug: item.slug,
             vaultPath: localPath,
-            createdAt: item.createdAt
+            createdAt: item.createdAt,
+            updatedAt: item.updatedAt ?? item.createdAt,
+            pinned: Boolean(item.pinned)
           })
-          addedNewProjects = true
+          projectsChanged = true
         }
       }
 
-      if (addedNewProjects) {
-        this.settingsManager.updateSettings({ projects: updatedLocalProjects })
+      if (projectsChanged && updatedLocalProjects.length > 0) {
+        const nextActive =
+          updatedLocalProjects.find((p) => p.id === initialSettings.activeProjectId) ??
+          updatedLocalProjects[0]
+        this.settingsManager.updateSettings({
+          projects: updatedLocalProjects,
+          activeProjectId: nextActive.id,
+          vaultPath: nextActive.vaultPath,
+          deletedProjectIds: Array.from(deletedIds)
+        })
         await this.onProjectsUpdated()
       }
 
@@ -310,7 +395,7 @@ export class SyncManager {
       let uploadedCount = 0
       let downloadedCount = 0
 
-      for (const item of mergedItems) {
+      for (const item of activeItems) {
         const localProj = updatedLocalProjects.find((p) => p.id === item.id)
         if (!localProj) continue
 
@@ -330,7 +415,7 @@ export class SyncManager {
         connected: true,
         state: 'idle',
         lastSyncedAt: Date.now(),
-        lastSummary: `${mergedItems.length} projects synced (${uploadedCount} uploaded, ${downloadedCount} downloaded)`,
+        lastSummary: `${activeItems.length} projects synced (${uploadedCount} uploaded, ${downloadedCount} downloaded)`,
         error: undefined
       })
       return this.getStatus()

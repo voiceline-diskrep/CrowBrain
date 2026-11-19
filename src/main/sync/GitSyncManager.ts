@@ -5,6 +5,7 @@ import { promisify } from 'node:util'
 import type { GitSyncStatus, ProjectEntry } from '@shared/types'
 import type { SettingsManager } from '../settings'
 import {
+  mergeJsonlContent,
   mergeManifestProjects,
   slugifyProjectName,
   type PortableManifest
@@ -112,15 +113,40 @@ export class GitSyncManager {
     }
   }
 
+  private async hasGitIdentity(cwd: string): Promise<boolean> {
+    try {
+      const name = await this.git(cwd, ['config', '--get', 'user.name'])
+      const email = await this.git(cwd, ['config', '--get', 'user.email'])
+      return Boolean(name && email)
+    } catch {
+      return false
+    }
+  }
+
+  private getProjectSlug(project: ProjectEntry): string {
+    return project.slug?.trim() || slugifyProjectName(project.name, project.id)
+  }
+
+  private isExternalProject(project: ProjectEntry, syncRoot: string): boolean {
+    const resolvedSrc = path.resolve(project.vaultPath)
+    const resolvedRoot = path.resolve(syncRoot)
+    return (
+      resolvedSrc !== resolvedRoot &&
+      !resolvedSrc.startsWith(resolvedRoot + path.sep) &&
+      resolvedSrc.toLowerCase() !== resolvedRoot.toLowerCase() &&
+      !resolvedSrc.toLowerCase().startsWith((resolvedRoot + path.sep).toLowerCase())
+    )
+  }
+
   private mirrorExternalProjectToRoot(project: ProjectEntry, syncRoot: string): void {
-    const slug = slugifyProjectName(project.name, project.id)
+    if (!this.isExternalProject(project, syncRoot)) {
+      return
+    }
+    const slug = this.getProjectSlug(project)
     const destRoot = path.join(syncRoot, slug)
     const resolvedSrc = path.resolve(project.vaultPath)
     const resolvedDest = path.resolve(destRoot)
 
-    if (resolvedSrc === resolvedDest || resolvedSrc.startsWith(path.resolve(syncRoot) + path.sep)) {
-      return
-    }
     if (!fs.existsSync(resolvedSrc)) {
       return
     }
@@ -133,13 +159,57 @@ export class GitSyncManager {
         const targetPath = path.join(targetDir, entry.name)
         if (entry.isDirectory()) {
           copyDir(srcPath, targetPath)
-        } else if (entry.isFile() && (entry.name.endsWith('.md') || entry.name.endsWith('.jsonl'))) {
+        } else if (entry.isFile() && entry.name.endsWith('.jsonl')) {
+          const localText = fs.readFileSync(srcPath, 'utf-8')
+          const existingText = fs.existsSync(targetPath) ? fs.readFileSync(targetPath, 'utf-8') : ''
+          const merged = mergeJsonlContent(localText, existingText)
+          fs.writeFileSync(targetPath, merged.mergedText, 'utf-8')
+        } else if (entry.isFile() && entry.name.endsWith('.md')) {
           fs.copyFileSync(srcPath, targetPath)
         }
       }
     }
 
     copyDir(resolvedSrc, resolvedDest)
+  }
+
+  private mirrorRootBackToExternalProject(project: ProjectEntry, syncRoot: string): void {
+    if (!this.isExternalProject(project, syncRoot)) {
+      return
+    }
+    const slug = this.getProjectSlug(project)
+    const srcRoot = path.join(syncRoot, slug)
+    const destRoot = path.resolve(project.vaultPath)
+    if (!fs.existsSync(srcRoot)) {
+      return
+    }
+
+    const copyBack = (srcDir: string, targetDir: string): void => {
+      fs.mkdirSync(targetDir, { recursive: true })
+      for (const entry of fs.readdirSync(srcDir, { withFileTypes: true })) {
+        if (entry.name.startsWith('.')) continue
+        const srcPath = path.join(srcDir, entry.name)
+        const targetPath = path.join(targetDir, entry.name)
+        if (entry.isDirectory()) {
+          copyBack(srcPath, targetPath)
+        } else if (entry.isFile() && entry.name.endsWith('.jsonl')) {
+          const pulledText = fs.readFileSync(srcPath, 'utf-8')
+          const localText = fs.existsSync(targetPath) ? fs.readFileSync(targetPath, 'utf-8') : ''
+          const merged = mergeJsonlContent(localText, pulledText)
+          if (merged.changedLocal) {
+            fs.writeFileSync(targetPath, merged.mergedText, 'utf-8')
+          }
+        } else if (entry.isFile() && entry.name.endsWith('.md')) {
+          const pulledText = fs.readFileSync(srcPath, 'utf-8')
+          const localText = fs.existsSync(targetPath) ? fs.readFileSync(targetPath, 'utf-8') : null
+          if (localText !== pulledText) {
+            fs.writeFileSync(targetPath, pulledText, 'utf-8')
+          }
+        }
+      }
+    }
+
+    copyBack(srcRoot, destRoot)
   }
 
   async syncNow(): Promise<GitSyncStatus> {
@@ -181,7 +251,11 @@ export class GitSyncManager {
         }
       }
 
-      const mergedBeforePull = mergeManifestProjects(settings.projects, existingManifest)
+      const mergedBeforePull = mergeManifestProjects(
+        settings.projects,
+        existingManifest,
+        settings.deletedProjectIds ?? []
+      )
       fs.writeFileSync(
         manifestPath,
         JSON.stringify(
@@ -195,7 +269,19 @@ export class GitSyncManager {
       await this.git(syncRoot, ['add', '-A'])
       const statusOut = await this.git(syncRoot, ['status', '--porcelain'])
       if (statusOut) {
-        await this.git(syncRoot, ['commit', '-m', 'Sync CrowBrain vault'])
+        const hasIdentity = await this.hasGitIdentity(syncRoot)
+        const commitArgs = hasIdentity
+          ? ['commit', '-m', 'Sync CrowBrain vault']
+          : [
+              '-c',
+              'user.name=CrowBrain',
+              '-c',
+              'user.email=crowbrain@local',
+              'commit',
+              '-m',
+              'Sync CrowBrain vault'
+            ]
+        await this.git(syncRoot, commitArgs)
       }
 
       let remoteBranchExists = false
@@ -219,29 +305,76 @@ export class GitSyncManager {
         }
       }
 
-      // Import any projects added by another device from manifest.json
+      // Reconcile pulled manifest (additions, renames, pins, tombstones) and mirror back to external vaults
       if (fs.existsSync(manifestPath)) {
         const pulledManifest = JSON.parse(
           fs.readFileSync(manifestPath, 'utf-8')
         ) as PortableManifest
-        const currentProjects = [...this.settingsManager.getSettings().projects]
-        let added = false
-        for (const item of pulledManifest.projects ?? []) {
-          if (!currentProjects.some((p) => p.id === item.id)) {
-            const localPath = path.join(syncRoot, item.slug)
-            fs.mkdirSync(localPath, { recursive: true })
-            currentProjects.push({
-              id: item.id,
-              name: item.name,
-              vaultPath: localPath,
-              createdAt: item.createdAt
+        const latestSettings = this.settingsManager.getSettings()
+        const reconciled = mergeManifestProjects(
+          latestSettings.projects,
+          pulledManifest,
+          latestSettings.deletedProjectIds ?? []
+        )
+        const activeItems = reconciled.filter((item) => !item.deleted)
+        const deletedIds = new Set(reconciled.filter((item) => item.deleted).map((item) => item.id))
+
+        const nextProjects: ProjectEntry[] = []
+        let changed = false
+
+        for (const local of latestSettings.projects) {
+          if (deletedIds.has(local.id)) {
+            changed = true
+            continue
+          }
+          const match = activeItems.find((item) => item.id === local.id)
+          if (match) {
+            if (match.name !== local.name || Boolean(match.pinned) !== Boolean(local.pinned)) {
+              changed = true
+            }
+            nextProjects.push({
+              ...local,
+              name: match.name,
+              slug: match.slug,
+              pinned: Boolean(match.pinned),
+              updatedAt: match.updatedAt ?? local.updatedAt
             })
-            added = true
+          } else {
+            nextProjects.push(local)
           }
         }
-        if (added) {
-          this.settingsManager.updateSettings({ projects: currentProjects })
+
+        for (const item of activeItems) {
+          if (!nextProjects.some((p) => p.id === item.id)) {
+            const localPath = path.join(syncRoot, item.slug)
+            fs.mkdirSync(localPath, { recursive: true })
+            nextProjects.push({
+              id: item.id,
+              name: item.name,
+              slug: item.slug,
+              vaultPath: localPath,
+              createdAt: item.createdAt,
+              updatedAt: item.updatedAt ?? item.createdAt,
+              pinned: Boolean(item.pinned)
+            })
+            changed = true
+          }
+        }
+
+        if (changed && nextProjects.length > 0) {
+          const nextActive =
+            nextProjects.find((p) => p.id === latestSettings.activeProjectId) ?? nextProjects[0]
+          this.settingsManager.updateSettings({
+            projects: nextProjects,
+            activeProjectId: nextActive.id,
+            vaultPath: nextActive.vaultPath,
+            deletedProjectIds: Array.from(deletedIds)
+          })
           await this.onProjectsUpdated()
+        }
+
+        for (const proj of nextProjects) {
+          this.mirrorRootBackToExternalProject(proj, syncRoot)
         }
       }
 
